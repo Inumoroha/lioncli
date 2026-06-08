@@ -1,0 +1,170 @@
+# `internal/mcp` 架构设计
+
+> 这个包干一件事:**把若干个外部 MCP server 连起来,把它们各自提供的 tools / resources / prompts 聚合成一张统一视图,供上层 LLM 调用。**
+>
+> 全包 7 个文件、约 1100 行。读它的正确姿势不是从第一行往下啃,而是顺着下面这条主线走一遍。
+
+---
+
+## 一、一句话主线
+
+```
+mcp.json (配置)
+   │  谁?怎么连?
+   ▼
+NewMCPManager  ──► 为每个 server 建 client(还没握手)
+   │
+   ▼
+Initialize     ──► 并发握手 + 记录能力 + 挂通知 + 启 worker + 预加载清单
+   │
+   ▼
+m.tools / m.resources / m.prompts  ◄── 三张聚合表(全包的核心状态)
+   │                                    ▲
+   │  对上:LLM 来调                      │  对下:server 推通知 → worker 刷新
+   ▼                                    │
+CallTool / ReadResource / GetPrompt   refresh.go
+```
+
+记住这张图,剩下的全是细节。
+
+---
+
+## 二、核心数据结构:`MCPManager`
+
+整个包就围绕 [`MCPManager`](manager.go) 这一个结构体转。它的字段分三组:
+
+| 字段组 | 内容 | 作用 |
+|--------|------|------|
+| **连接** | `servers map[string]*serverState` | 每个 server 的 client + 它声明的 capabilities |
+| **聚合视图** | `tools` / `resources` / `prompts` 三张 map | 把所有 server 的能力拍平成一张表,key 带 server 前缀 |
+| **并发协调** | `mu` / `refreshCh` / `done` / `wg` / `cbMu` + 回调切片 | 让"读调用"和"后台刷新"互不踩踏 |
+
+> **设计意图**:为什么聚合表的 key 要带前缀(`mcp__<server>__<原名>`)?
+> 因为两个 server 可能都有叫 `read_file` 的工具。前缀既避免冲突,又能在调用时**路由回**是哪个 server 的哪个原名。这就是 `toolEntry` 里同时存 `serverName` 和 `originalName` 的原因——LLM 看到的是带前缀的名字,真正调用时要还原回去。
+
+---
+
+## 三、文件分工(职责切分)
+
+包是按"骨架 vs 领域操作 vs 通路"切的,不是按文件大小切的:
+
+| 文件 | 职责 | 关键词 |
+|------|------|--------|
+| [`config.go`](config.go) | 配置的数据结构 | `MCPServerConfig` / `MCPConfig` |
+| [`manager.go`](manager.go) | **骨架**:生命周期 + 共享状态 + 连接构建 | `NewMCPManager` / `Initialize` / `Close` / `buildClient` / `expandVars` |
+| [`tool.go`](tool.go) | tools 领域:加载 + 调用 | `loadTools` / `CallTool` / `AllLLMTools` |
+| [`resource.go`](resource.go) | resources 领域:加载 + 读取 | `loadResources` / `ReadResource` |
+| [`prompt.go`](prompt.go) | prompts 领域:加载 + 渲染 | `loadPrompts` / `GetPrompt` |
+| [`refresh.go`](refresh.go) | **通路**:通知 → channel → worker → 刷新表 | `makeNotificationHandler` / `startWorker` / `refreshXxxFor` |
+| [`status.go`](status.go) | 只读快照,给用户看状态 | `StatusSnapshot` / `FormatStatus` |
+
+> **注意 tool/resource/prompt 三个文件高度同构**:每个都是
+> `类型定义 → toXxx 转换 → loadXxx 加载 → listAllXxx 分页 → AllXxx 查询 → 调用(Call/Read/Get)`。
+> 看懂 `tool.go` 一个,另外两个基本是复制粘贴换名字。**这是你今晚最值得先读的文件。**
+
+---
+
+## 四、两条值得专门理解的硬骨头
+
+这两处是这个包真正"有设计"的地方,也是最容易看不懂的地方。看懂它们,你就拿到了这个包 80% 的精华。
+
+### 1. 连接的两种 transport + 占位符展开
+
+[`buildClient`](manager.go) 根据配置推断走哪种通路:
+
+```
+有 Type?  ──是──► 用 Type 决定
+   │否
+   ▼
+有 URL?   ──是──► streamable-http
+   │否
+   ▼
+        stdio(启子进程,如 npx ...)
+```
+
+配置里的 `${cwd}` / `${home}` / `${comspec}` / `${env:NAME}` 由 [`expandVars`](manager.go) 在建连时替换。
+> **为什么需要 `${comspec}`**?Windows 上 Go 1.20+ 拒绝执行 cwd 同名程序,所以用 `cmd.exe` 的绝对路径绕开。
+> **为什么需要 `${env:NAME}`**?给 http header 注入 token,避免把 secret 明文写进 `mcp.json`。
+
+### 2. 通知刷新:为什么要绕一个 channel + worker?(全包最精妙处)
+
+server 的工具列表会变(比如它动态注册了新工具),它会推一条 `tools/list_changed` 通知。问题在于:
+
+> **这个通知回调是在 transport 的"读循环"里被同步调用的。如果你在回调里直接发 RPC 去 `ListTools`,那个 RPC 的响应也得靠同一个读循环送回来——读循环正卡在你的回调里,于是死锁。**
+
+解法(就是 [`refresh.go`](refresh.go) 的全部理由):
+
+```
+server 推通知
+   │
+   ▼
+makeNotificationHandler  ── 只做一件事:塞个 refreshReq 进 channel(满了就丢)
+   │  (绝不阻塞、绝不发 RPC)
+   ▼
+refreshCh (缓冲 64)
+   │
+   ▼
+单个长生命 worker goroutine  ── 从 channel 取出,这里才真正发 RPC 去刷新
+   │
+   ▼
+refreshXxxFor ── 拉新清单 → 删掉该 server 的旧条目 → 写入新条目 → 触发回调
+```
+
+几个连带的精妙决策,每一个都能当一道"删了会怎样"的自测题:
+- **为什么 channel 满了直接丢通知?** —— 在读循环里阻塞会让整个 client 失去响应,代价太大;丢一次没关系,下次通知或重连会兜底。
+- **为什么刷新失败时保留旧缓存而不清空?** —— 清空再失败,LLM 会短暂看不到任何工具,比拿着旧数据更糟。
+- **为什么回调要先复制切片、释放锁再调?**(`snapshotCBs`) —— 回调里可能反过来调 `AllLLMTools()`,不释放锁就死锁。
+
+---
+
+## 五、并发模型(一张表讲清谁碰什么)
+
+| 阶段 | 谁在跑 | 碰哪些状态 | 怎么保护 |
+|------|--------|-----------|----------|
+| 建连 | 主 goroutine | `servers` | 无需锁(独占) |
+| 握手 | N 个临时 goroutine 并发 | 各写各的 `serverState` | 无需锁(各管各的) |
+| 预加载 | 主 goroutine | 三张聚合表 | `mu.Lock()` 写 |
+| 运行期·读 | LLM 调用线 | 三张聚合表 | `mu.RLock()` 读 |
+| 运行期·刷新 | 单个 worker | 三张聚合表 | `mu.Lock()` 写 |
+| 回调 | worker(锁已释放) | 回调切片 | `cbMu` 独立保护 |
+
+> **关键约束**:`servers` 在握手后只读,所以不在 `mu` 保护范围内;聚合表是唯一被并发读写的,所以用 `RWMutex`。
+> **关闭顺序**(`Close`):先停 worker 等它退出,再关 client——反过来会撞上 transport 已关闭的 channel。
+
+---
+
+## 六、读这个包的建议路线
+
+别按文件名字母序读。按这个顺序,每一步都带着上一步的上下文:
+
+1. **`config.go`**(2 分钟)—— 知道输入长什么样。
+2. **`manager.go` 的 `NewMCPManager` + `Initialize`** —— 主线骨架,这是地图。
+3. **`tool.go` 整个** —— 一个领域的完整闭环(加载→查询→调用)。读懂它,resource/prompt 跳着看即可。
+4. **`refresh.go` 整个** —— 全包最有设计含量的部分。配合上面第四节第 2 点读。
+5. **`manager.go` 的 `buildClient` / `expandVars`** —— 连接细节,最后补。
+6. `status.go` —— 纯展示,随便扫。
+
+**自测题(答得上来 = 真懂了):**
+- 如果把 `refreshCh` 的缓冲从 64 改成 0,会发生什么?
+- 如果 `makeNotificationHandler` 里不走 channel、直接调 `listAllTools`,哪一行会死锁?
+- 如果 `refreshToolsFor` 在 list 失败时清空旧表,用户会看到什么现象?
+- 两个 server 都提供叫 `search` 的工具,LLM 怎么知道调哪个?代码哪一行做的路由?
+
+---
+
+## 附:这个包对外暴露的 API(上层只需要知道这些)
+
+```go
+NewMCPManager(cfg) *MCPManager        // 建,但还没连
+(m).Initialize(ctx)                   // 连 + 握手 + 加载
+(m).AllLLMTools() []llm.Tool          // 拿全部工具给 LLM
+(m).CallTool(ctx, name, args)         // LLM 发起调用
+(m).AllResources() / ReadResource()   // 资源
+(m).AllPrompts()   / GetPrompt()      // prompt
+(m).OnToolsChanged(cb)                // 工具列表变了通知我
+(m).StatusSnapshot() / FormatStatus() // 给用户看状态
+(m).Close()                           // 收尾
+```
+
+> 其余全是包内私有的小写函数——它们是"怎么实现"的细节,改动它们不影响上层。
+> **这就是为什么这个包看起来文件多:大部分代码是实现细节,真正的对外契约只有上面这十几行。**

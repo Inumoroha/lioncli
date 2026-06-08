@@ -1,0 +1,29 @@
+{
+    "mcpServers": {
+        "filesystem": {
+            "type": "stdio",
+            "command": "${comspec}",
+            "args": [
+                "/c",
+                "npx",
+                "-y",
+                "@modelcontextprotocol/server-filesystem",
+                "${cwd}"
+            ]
+        },
+        "server-everything-http": {
+            "type": "streamable-http",
+            "url": "http://localhost:3001/mcp"
+        },
+        "chrome-devtools": {
+            "command": "${comspec}",
+            "args": [
+                "/c",
+                "npx",
+                "-y",
+                "chrome-devtools-mcp@latest",
+                "--autoConnect"
+            ]
+        }
+    }
+}
