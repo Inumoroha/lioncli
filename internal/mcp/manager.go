@@ -116,6 +116,9 @@ func buildClient(cfg MCPServerConfig) (*client.Client, string, error) {
 	}
 }
 
+
+// resolveTransport 根据 server 配置推断 transport 类型。
+// 显式 Type 优先；未填则有 URL 走 http，否则 stdio。
 func resolveTransport(cfg MCPServerConfig) string {
 	if cfg.Type != "" {
 		return cfg.Type
