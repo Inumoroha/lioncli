@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -95,7 +96,9 @@ func pumpStderr(c *client.Client, serverName string) {
 		for scanner.Scan() {
 			log.Printf("📥 [mcp:%s] %s", serverName, scanner.Text())
 		}
-		if err := scanner.Err(); err != nil && err != io.EOF {
+		// Close() 会主动关掉 stderr 管道，阻塞中的 Scan 随之返回 os.ErrClosed
+		// （"file already closed"）。这是正常停机，不是错误，和 EOF 一样静默收尾。
+		if err := scanner.Err(); err != nil && err != io.EOF && !errors.Is(err, os.ErrClosed) {
 			log.Printf("⚠️ [mcp:%s] stderr 读取错误: %v", serverName, err)
 		}
 	}()
@@ -116,9 +119,7 @@ func buildClient(cfg MCPServerConfig) (*client.Client, string, error) {
 	}
 }
 
-
 // resolveTransport 根据 server 配置推断 transport 类型。
-// 显式 Type 优先；未填则有 URL 走 http，否则 stdio。
 func resolveTransport(cfg MCPServerConfig) string {
 	if cfg.Type != "" {
 		return cfg.Type
@@ -129,19 +130,31 @@ func resolveTransport(cfg MCPServerConfig) string {
 	return "stdio"
 }
 
+// buildStdioClient 构建基于标准输入输出(stdio)传输的MCP客户端。
+// 通过fork子进程并与其建立stdin/stdout管道通信。
+// 参数:
+//   cfg - MCP服务器配置，包含命令、参数和环境变量
+// 返回:
+//   *client.Client - MCP客户端实例
+//   string - 传输类型标识"stdio"
+//   error - 错误信息
 func buildStdioClient(cfg MCPServerConfig) (*client.Client, string, error) {
+	// 验证命令不能为空
 	if cfg.Command == "" {
 		return nil, "", fmt.Errorf("stdio transport requires non-empty command")
 	}
+	// 获取当前进程环境变量，并追加配置中指定的环境变量
 	env := os.Environ()
 	for k, v := range cfg.Env {
 		env = append(env, k+"="+expandVars(v))
 	}
+	// 展开命令和参数中的变量占位符（如${env:XXX}、${cwd}等）
 	command := expandVars(cfg.Command)
 	args := make([]string, len(cfg.Args))
 	for i, a := range cfg.Args {
 		args[i] = expandVars(a)
 	}
+	// 创建stdio客户端，启动子进程并建立管道通信
 	c, err := client.NewStdioMCPClient(command, env, args...)
 	if err != nil {
 		return nil, "", err
@@ -149,12 +162,23 @@ func buildStdioClient(cfg MCPServerConfig) (*client.Client, string, error) {
 	return c, "stdio", nil
 }
 
+// buildStreamableHTTPClient 构建基于流式HTTP传输的MCP客户端。
+// 通过HTTP/HTTPS协议与远程MCP server通信，支持流式响应。
+// 参数:
+//   cfg - MCP服务器配置，包含URL和自定义请求头
+// 返回:
+//   *client.Client - MCP客户端实例
+//   string - 传输类型标识"streamable-http"
+//   error - 错误信息
 func buildStreamableHTTPClient(cfg MCPServerConfig) (*client.Client, string, error) {
+	// 验证URL不能为空
 	if cfg.URL == "" {
 		return nil, "", fmt.Errorf("streamable-http transport requires non-empty url")
 	}
+	// 展开URL中的变量占位符
 	url := expandVars(cfg.URL)
 	var opts []transport.StreamableHTTPCOption
+	// 如果配置了自定义请求头，将其添加到客户端选项中
 	if len(cfg.Headers) > 0 {
 		headers := make(map[string]string, len(cfg.Headers))
 		for k, v := range cfg.Headers {
@@ -163,6 +187,7 @@ func buildStreamableHTTPClient(cfg MCPServerConfig) (*client.Client, string, err
 		}
 		opts = append(opts, transport.WithHTTPHeaders(headers))
 	}
+	// 创建流式HTTP客户端
 	c, err := client.NewStreamableHttpClient(url, opts...)
 	if err != nil {
 		return nil, "", err
@@ -242,31 +267,47 @@ func (m *MCPManager) Initialize(ctx context.Context) {
 	m.loadPrompts(ctx)
 }
 
-// Close 先通知 worker 退出并等其结束，再关闭所有底层 client。
-// 顺序很重要：worker 还在用 client 时不能关，否则会撞到 transport 的 closed channel。
+// Close 优雅地关闭 MCPManager，释放所有资源。
+// 关闭顺序至关重要：必须先停止后台 worker，再关闭底层 client 连接。
+// 如果顺序颠倒，worker 在处理通知时可能会访问已关闭的 transport channel。
+// 返回:
+//   error - 第一个发生的关闭错误（所有 client 都会被尝试关闭，不会因单个错误中断）
 func (m *MCPManager) Close() error {
+	// 1. 关闭 done channel，通知 worker 退出循环
 	close(m.done)
+	// 2. 等待 worker goroutine 完全退出
 	m.wg.Wait()
 
+	// 3. 逐个关闭所有 MCP client 连接
 	var firstErr error
 	for serverName, s := range m.servers {
 		if err := s.client.Close(); err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("close %s: %w", serverName, err)
 		}
 	}
+	// 返回第一个错误（如果有的话），即使有多个错误也只报告第一个
 	return firstErr
 }
 
-// extractText 把 mcp 协议里多段 Content 合成一段文本。非文本段走 JSON
-// 兜底序列化，确保上层不会因为遇到 image/audio 等 content 而拿到空串。
+// extractText 把 MCP 协议中的多段 Content 合并成一段文本字符串。
+// 文本内容直接拼接，非文本内容（如图像、音频等）通过 JSON 序列化兜底处理，
+// 确保上层调用者不会因为遇到非文本类型的 content 而获得空串。
+// 参数:
+//   content - MCP协议中的内容片段列表
+// 返回:
+//   string - 合并后的文本字符串
 func extractText(content []mcplib.Content) string {
 	var b strings.Builder
+	// 遍历所有内容片段
 	for _, c := range content {
 		switch v := c.(type) {
+		// 处理值类型的 TextContent
 		case mcplib.TextContent:
 			b.WriteString(v.Text)
+		// 处理指针类型的 TextContent
 		case *mcplib.TextContent:
 			b.WriteString(v.Text)
+		// 非文本内容走 JSON 序列化兜底
 		default:
 			if raw, err := json.Marshal(c); err == nil {
 				b.Write(raw)
@@ -295,10 +336,6 @@ func expandVars(s string) string {
 	for placeholder, value := range replacements {
 		s = strings.ReplaceAll(s, placeholder, value)
 	}
-
-	// 替换 ${env:NAME} 为实际值,ReplaceAllStringFunc 的作用是将匹配到的字符串替换为一个函数返回的字符串。
-	// 这里我们使用一个匿名函数，该函数的参数是匹配到的字符串，返回值是环境变量的值
-	// 这里我们使用 os.Getenv 函数获取环境变量的值，如果环境变量不存在，则返回空字符串。
 	return envVarPattern.ReplaceAllStringFunc(s, func(match string) string {
 		name := match[len("${env:") : len(match)-1]
 		return os.Getenv(name)

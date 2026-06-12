@@ -32,29 +32,42 @@ type toolEntry struct {
 	llmTool      llm.Tool
 }
 
+// toLLMTool 将 MCP 协议定义的工具转换为 LLM 工具格式。
+// 通过在工具名称前添加服务器名称前缀，确保不同服务器的同名工具不会冲突。
+// 参数:
+//   serverName - MCP服务器名称
+//   t - MCP协议定义的工具对象
+// 返回:
+//   llm.Tool - LLM可识别的工具格式
 func toLLMTool(serverName string, t mcplib.Tool) llm.Tool {
 	return llm.Tool{
-		Name:        keyOf(serverName, t.Name),
-		Description: t.Description,
-		Parameters:  toMapSchema(t.InputSchema),
+		Name:        keyOf(serverName, t.Name), // 使用keyOf生成带服务器前缀的唯一名称
+		Description: t.Description,             // 直接使用原工具描述
+		Parameters:  toMapSchema(t.InputSchema), // 将输入模式转换为LLM参数格式
 	}
 }
 
+// toMapSchema 将 MCP 工具输入模式转换为 LLM 可识别的 JSON Schema 格式。
+// 只包含非空字段，避免传递不必要的空值给 LLM。
+// 参数:
+//   s - MCP协议定义的工具输入模式
+// 返回:
+//   map[string]interface{} - JSON Schema 格式的参数定义
 func toMapSchema(s mcplib.ToolInputSchema) map[string]interface{} {
 	m := map[string]interface{}{
-		"type": s.Type,
+		"type": s.Type, // JSON Schema 类型
 	}
 	if s.Properties != nil {
-		m["properties"] = s.Properties
+		m["properties"] = s.Properties // 属性定义
 	}
 	if len(s.Required) > 0 {
-		m["required"] = s.Required
+		m["required"] = s.Required // 必填字段列表
 	}
 	if s.Defs != nil {
-		m["$defs"] = s.Defs
+		m["$defs"] = s.Defs // 可复用的定义引用
 	}
 	if s.AdditionalProperties != nil {
-		m["additionalProperties"] = s.AdditionalProperties
+		m["additionalProperties"] = s.AdditionalProperties // 额外属性约束
 	}
 	return m
 }
@@ -149,7 +162,7 @@ func (m *MCPManager) AllLLMTools() []llm.Tool {
 // 参数 name: LLM 看到的带前缀的工具名（格式: mcp__<server>__<original>）
 // 参数 args: 工具调用的参数映射
 // 返回值: 工具执行结果文本，以及可能的错误
-func (m *MCPManager)                          CallTool(ctx context.Context, name string, args map[string]any) (string, error) {
+func (m *MCPManager) CallTool(ctx context.Context, name string, args map[string]any) (string, error) {
 	// 读取工具映射，查找对应的工具条目
 	m.mu.RLock()
 	entry, ok := m.tools[name]
