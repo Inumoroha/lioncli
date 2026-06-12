@@ -2,3 +2,9 @@
 .env
 cmd/*
 test/*
+
+# 编译产物:go build 直接输出到仓库根时会留下同名可执行文件。
+*.exe
+
+# 本地工具配置(Claude Code 等),按机器而异,不入库。
+.claude/
