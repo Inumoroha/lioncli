@@ -8,3 +8,6 @@ test/*
 
 # 本地工具配置(Claude Code 等),按机器而异,不入库。
 .claude/
+
+# 测试文件不入库。
+*_test.go
