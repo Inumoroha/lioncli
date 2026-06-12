@@ -149,7 +149,7 @@ func (m *MCPManager) AllLLMTools() []llm.Tool {
 // 参数 name: LLM 看到的带前缀的工具名（格式: mcp__<server>__<original>）
 // 参数 args: 工具调用的参数映射
 // 返回值: 工具执行结果文本，以及可能的错误
-func (m *MCPManager) CallTool(ctx context.Context, name string, args map[string]any) (string, error) {
+func (m *MCPManager)                          CallTool(ctx context.Context, name string, args map[string]any) (string, error) {
 	// 读取工具映射，查找对应的工具条目
 	m.mu.RLock()
 	entry, ok := m.tools[name]
