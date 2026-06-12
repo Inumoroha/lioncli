@@ -30,7 +30,7 @@ type refreshReq struct {
 const refreshChanBuf = 64
 
 // makeNotificationHandler 返回挂在 *client.Client 上的通知回调。
-// 注意：handler 在 transport 读循环里同步被调，**不能阻塞、不能发 RPC**
+// 注意：handler 在 transport 读循环里同步被调，不能阻塞、不能发 RPC
 // （ListXxx 的响应也得由这个读循环送达，会死锁），所以这里只把请求扔进 channel。
 func (m *MCPManager) makeNotificationHandler(serverName string) func(mcplib.JSONRPCNotification) {
 	return func(n mcplib.JSONRPCNotification) {
@@ -227,6 +227,10 @@ func (m *MCPManager) fireToolsChanged()     { fireAll(m.snapshotCBs(&m.toolsCBs)
 func (m *MCPManager) fireResourcesChanged() { fireAll(m.snapshotCBs(&m.resourcesCBs)) }
 func (m *MCPManager) firePromptsChanged()   { fireAll(m.snapshotCBs(&m.promptsCBs)) }
 
+// snapshotCBs 创建回调函数切片的快照副本
+// 在持有 cbMu 锁的情况下复制切片，确保并发安全
+// slice: 指向回调函数切片的指针
+// 返回值: 回调函数切片的副本
 func (m *MCPManager) snapshotCBs(slice *[]func()) []func() {
 	m.cbMu.Lock()
 	defer m.cbMu.Unlock()
@@ -235,6 +239,8 @@ func (m *MCPManager) snapshotCBs(slice *[]func()) []func() {
 	return out
 }
 
+// fireAll 依次执行传入的所有回调函数
+// cbs: 待执行的回调函数切片
 func fireAll(cbs []func()) {
 	for _, cb := range cbs {
 		cb()

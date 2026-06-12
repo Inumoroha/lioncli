@@ -295,6 +295,10 @@ func expandVars(s string) string {
 	for placeholder, value := range replacements {
 		s = strings.ReplaceAll(s, placeholder, value)
 	}
+
+	// 替换 ${env:NAME} 为实际值,ReplaceAllStringFunc 的作用是将匹配到的字符串替换为一个函数返回的字符串。
+	// 这里我们使用一个匿名函数，该函数的参数是匹配到的字符串，返回值是环境变量的值
+	// 这里我们使用 os.Getenv 函数获取环境变量的值，如果环境变量不存在，则返回空字符串。
 	return envVarPattern.ReplaceAllStringFunc(s, func(match string) string {
 		name := match[len("${env:") : len(match)-1]
 		return os.Getenv(name)
