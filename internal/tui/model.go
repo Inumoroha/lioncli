@@ -682,3 +682,4 @@ func (m model) tokenUsage() string {
 	}
 	return m.agent.TokenUsageCompact()
 }
+
