@@ -95,7 +95,7 @@ func approvalSummary(req hitl.ApprovalRequest, res hitl.ApprovalResult) string {
 
 func approvalKeyHint(req hitl.ApprovalRequest) string {
 	if hitl.IsMCPTool(req.ToolName) {
-		return fmt.Sprintf("Approval required for [%s]: Enter/y approve, a always allow this tool, s always allow this server, n reject", req.ToolName)
+		return fmt.Sprintf("Approve [%s]: Enter or y\n  a: always allow this tool\n  s: always allow this server\n  n: reject", req.ToolName)
 	}
-	return fmt.Sprintf("Approval required for [%s]: Enter/y approve, a always allow this tool, n reject", req.ToolName)
+	return fmt.Sprintf("Approve [%s]: Enter or y\n  a: always allow this tool\n  n: reject", req.ToolName)
 }

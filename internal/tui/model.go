@@ -61,6 +61,10 @@ type model struct {
 	taskInitErr      string
 	mcpStatus        func() mcp.StatusSnapshot
 	commandMenuIndex int
+
+	inputHistory   []string
+	historyIndex   int
+	tempInput      string // 保存用户正在编辑但尚未提交的输入
 }
 
 func newModel(a Agent, modelName string, mcpStatus func() mcp.StatusSnapshot) model {
@@ -98,6 +102,7 @@ func newModel(a Agent, modelName string, mcpStatus func() mcp.StatusSnapshot) mo
 		taskManager: taskManager,
 		taskInitErr: taskInitErr,
 		mcpStatus:   mcpStatus,
+		historyIndex: 0,
 	}
 }
 
@@ -143,6 +148,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if updated, handled := m.handleCommandMenuKey(msg); handled {
 				return updated, nil
 			}
+			// 处理历史记录导航
+				if updated, handled := m.handleHistoryKey(msg); handled {
+					return updated, nil
+				}
 		}
 		if msg.Type == tea.KeyEnter && !m.waiting && !msg.Alt {
 			return m.submitInput()
@@ -218,6 +227,9 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 	if text == "" {
 		return m, nil
 	}
+
+	// 添加到历史记录
+	m.addToHistory(text)
 
 	if strings.HasPrefix(text, "/team ") || text == "/team" {
 		return m.startAgentLikeCommand(text, "/team", "Usage: /team <goal>", m.runTeam)
@@ -304,10 +316,7 @@ func (m model) View() string {
 		}
 	}
 
-	help := helpStyle.Width(m.width - 2).Render(
-		"Enter: send   Shift+Enter: newline   @image:<path>/@clipboard   /help /tools /task /plan /team /index /memory /hitl   Ctrl+C: quit",
-	)
-	return lipgloss.JoinVertical(lipgloss.Left, header, chat, inputArea, help)
+	return lipgloss.JoinVertical(lipgloss.Left, header, chat, inputArea)
 }
 
 func (m *model) resize() {
@@ -315,9 +324,8 @@ func (m *model) resize() {
 		return
 	}
 	headerH := 3
-	helpH := 3
 	inputH := inputHeight + 2
-	vpH := m.height - headerH - helpH - inputH - 2
+	vpH := m.height - headerH - inputH - 2
 	if vpH < 3 {
 		vpH = 3
 	}
@@ -681,5 +689,80 @@ func (m model) tokenUsage() string {
 		return ""
 	}
 	return m.agent.TokenUsageCompact()
+}
+
+// handleHistoryKey 处理上下箭头键来浏览输入历史
+func (m model) handleHistoryKey(msg tea.KeyMsg) (model, bool) {
+	// 只有当命令菜单不显示时才处理历史记录
+	if m.commandMenuMatches() != nil {
+		return m, false
+	}
+
+	switch msg.Type {
+	case tea.KeyUp:
+		// 如果当前不在历史记录中，先保存当前输入
+		if m.historyIndex == -1 || m.historyIndex == len(m.inputHistory) {
+			current := m.input.Value()
+			if current != "" {
+				m.tempInput = current
+			}
+		}
+		// 如果历史记录不为空
+		if len(m.inputHistory) > 0 {
+			// 移动到上一条
+			if m.historyIndex == -1 || m.historyIndex == len(m.inputHistory) {
+				m.historyIndex = len(m.inputHistory) - 1
+			} else if m.historyIndex > 0 {
+				m.historyIndex--
+			}
+			// 设置输入值为历史记录
+			m.input.SetValue(m.inputHistory[m.historyIndex])
+			m.input.CursorEnd()
+		}
+		return m, true
+
+	case tea.KeyDown:
+		// 移动到下一条
+		if m.historyIndex != -1 && m.historyIndex < len(m.inputHistory) {
+			m.historyIndex++
+			if m.historyIndex < len(m.inputHistory) {
+				m.input.SetValue(m.inputHistory[m.historyIndex])
+				m.input.CursorEnd()
+			} else {
+				// 回到当前输入
+				m.input.SetValue(m.tempInput)
+				m.input.CursorEnd()
+				m.historyIndex = len(m.inputHistory)
+			}
+		}
+		return m, true
+
+	default:
+		// 用户输入其他字符时，重置历史索引
+		if m.historyIndex != -1 && m.historyIndex != len(m.inputHistory) {
+			m.historyIndex = len(m.inputHistory)
+		}
+		return m, false
+	}
+}
+
+// addToHistory 添加输入到历史记录
+func (m *model) addToHistory(text string) {
+	if text == "" {
+		return
+	}
+	// 避免重复添加相同的输入
+	if len(m.inputHistory) > 0 && m.inputHistory[len(m.inputHistory)-1] == text {
+		return
+	}
+	m.inputHistory = append(m.inputHistory, text)
+	// 限制历史记录数量（可选）
+	const maxHistory = 100
+	if len(m.inputHistory) > maxHistory {
+		m.inputHistory = m.inputHistory[1:]
+	}
+	// 重置历史索引
+	m.historyIndex = len(m.inputHistory)
+	m.tempInput = ""
 }
 
