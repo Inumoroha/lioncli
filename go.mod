@@ -9,8 +9,10 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/go-ego/gse v1.0.2
 	github.com/google/uuid v1.6.0
+	github.com/joho/godotenv v1.5.1
 	github.com/mark3labs/mcp-go v0.54.1
 	github.com/serpapi/google-search-results-golang v0.0.0-20260216165834-0f349178cf10
+	golang.org/x/image v0.42.0
 	golang.org/x/net v0.56.0
 	golang.org/x/text v0.38.0
 )
@@ -49,7 +51,6 @@ require (
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/yuin/goldmark v1.7.13 // indirect
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
-	golang.org/x/image v0.42.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/term v0.44.0 // indirect
 )
