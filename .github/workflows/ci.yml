@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 最小权限：CI 只需要读取仓库内容。
+permissions:
+  contents: read
+
+# 同一分支/PR 的新提交会取消仍在跑的旧任务，省额度。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build & Test (race)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 以 go.mod 里的 `go 1.25.5` 作为唯一版本来源，避免版本漂移。
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      # 校验 go.sum 与模块缓存一致，防止被篡改的依赖。
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      # Ubuntu runner 自带 gcc，CGO 默认开启，-race 开箱即用。
+      # race detector 能抓出 ToolRegistry 等并发结构的数据竞争。
+      - name: Test (race + coverage)
+        run: go test -race -coverprofile=coverage.out ./...
+
+  # 格式检查独立成 job 且允许失败：暴露格式债务但不阻塞主门禁。
+  # 待全部文件 gofmt 干净后，可删掉 continue-on-error 让它变成硬性检查。
+  format:
+    name: gofmt
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未通过 gofmt，请运行 'gofmt -w .'："
+            echo "$unformatted"
+            exit 1
+          fi
+          echo "所有文件均已 gofmt 格式化。"
