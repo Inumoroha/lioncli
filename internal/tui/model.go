@@ -137,6 +137,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 
+	case tea.MouseMsg:
+		// 滚轮事件只交给聊天区视口，用来滚动查看 AI 的长段回复，
+		// 不要让输入框或历史导航处理它。
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		return m, cmd
+
 	case tea.KeyMsg:
 		if msg.Type == tea.KeyCtrlC || msg.Type == tea.KeyCtrlD {
 			return m, tea.Quit

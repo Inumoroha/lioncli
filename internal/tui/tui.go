@@ -8,9 +8,10 @@ import (
 
 func Run(a Agent, modelName string, mcpStatus func() mcp.StatusSnapshot) error {
 	m := newModel(a, modelName, mcpStatus)
-	// 不捕获鼠标事件，让用户可以用终端的原生鼠标选择功能
-	// 用户可以按 Shift+鼠标 或 Ctrl+Shift+鼠标 来选择文本，然后用 Ctrl+Shift+C 复制
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	// 捕获鼠标事件，使滚轮可以滚动聊天区（查看 AI 的长段回复）。
+	// 否则在全屏模式下终端会把滚轮转换成上/下方向键，被输入历史导航吞掉。
+	// 需要用终端原生鼠标选择文本时，按住 Shift 拖动即可（再用 Ctrl+Shift+C 复制）。
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
 }
