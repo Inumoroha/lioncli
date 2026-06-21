@@ -1,5 +1,8 @@
 # lioncli
 
+[![CI](https://github.com/Inumoroha/lioncli/actions/workflows/ci.yml/badge.svg)](https://github.com/Inumoroha/lioncli/actions/workflows/ci.yml)
+[![Go Version](https://img.shields.io/badge/go-1.25.5-00ADD8?logo=go)](go.mod)
+
 `lioncli` 是一个用 Go 编写的终端智能体 CLI。它提供 TUI 聊天界面，把 LLM、工具调用、MCP、技能、记忆、RAG 代码检索、规划执行、多智能体协作和人工审批串在一起，适合在本地项目目录里做开发辅助和自动化任务。
 
 ## 功能
@@ -13,6 +16,63 @@
 - 规划与协作：支持 `/plan` 规划执行和 `/team` 多智能体协作。
 - RAG 代码检索：支持 `/index` 建立代码索引，`code_search` 工具检索项目代码。
 - Runtime API：可选开启本地 HTTP runtime API。
+
+## 架构
+
+整体分层：`cmd` 负责装配，`tui` 负责交互，`agent` 是编排核心（驱动「对话 → 工具调用 → 结果」循环），下面挂着各能力模块，最底层是统一的 `llm` 抽象（屏蔽 OpenAI / Anthropic 协议差异）。`tool` 注册表把本地内置工具和 MCP 远程工具收进同一个池子，`agent` 只面对统一接口、不关心工具实现在本地还是走 MCP 子进程。
+
+```mermaid
+flowchart TD
+    main["cmd · 启动装配"]
+
+    subgraph UI["交互层"]
+        tui["tui · Bubble Tea TUI"]
+        render["render · Markdown 渲染"]
+    end
+
+    subgraph Core["编排核心"]
+        agent["agent · 对话 / 工具循环"]
+    end
+
+    subgraph Cap["能力层"]
+        tool["tool · 工具注册表"]
+        builtin["tool/builtin · 命令/文件/网页"]
+        mcp["mcp · MCP 集成"]
+        rag["rag · 代码检索"]
+        multiagent["multiagent · 多智能体"]
+        plan["plan · 任务规划"]
+        skill["skill · 技能加载"]
+        memory["memory · 记忆"]
+        hitl["hitl · 人工审批"]
+        web["web · 搜索 / 抓取"]
+        segment["segment · 中文分词"]
+    end
+
+    subgraph LLM["模型抽象层"]
+        llm["llm · 统一接口"]
+        openai["openai 适配"]
+        anthropic["anthropic 适配"]
+    end
+
+    subgraph RT["运行时"]
+        rtapi["runtime/api · HTTP API"]
+        rttask["runtime/task · 后台任务"]
+    end
+
+    main --> tui & agent & mcp & rtapi & builtin
+
+    tui --> agent & hitl & mcp & render & rttask
+
+    agent --> tool & llm & hitl & memory & rag & plan & multiagent & skill
+
+    builtin --> tool & web
+    tool --> mcp & llm
+    mcp --> llm
+    multiagent --> tool & llm & hitl
+    rag --> segment
+
+    llm --> openai & anthropic
+```
 
 ## 环境要求
 
